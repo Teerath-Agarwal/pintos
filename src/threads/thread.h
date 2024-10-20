@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -101,6 +102,15 @@ struct thread
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
+
+/* A struct that defines a thread which is in sleeping state. Wakes up 
+   after wake_up_tick by the timer interrupt */
+struct sleeping_thread {
+   struct thread *thread;               /* Thread that is sleeping */
+   int64_t wake_up_tick;                /* The tick after which thread will wake up */
+   struct semaphore sleep_sema;         /* Semphore lock to sleep the thread */
+   struct list_elem elem;               /* List element */
+};
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
