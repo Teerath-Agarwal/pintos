@@ -20,13 +20,11 @@
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
 
+static int64_t wakeup_tick;
+
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
-
-/* List of processes in THREAD_BLOCKED state, that is, processes
-   that are blocked and sleeping untill specified ticks. */
-static struct list sleep_list;
 
 static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
@@ -41,9 +39,6 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
-
-  /* Initializing the sleepign threads' list */
-  list_init (&sleep_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -73,6 +68,26 @@ timer_calibrate (void)
   printf ("%'"PRIu64" loops/s.\n", (uint64_t) loops_per_tick * TIMER_FREQ);
 }
 
+int is_wakeup_time(void){
+  ASSERT(intr_context());
+  return ticks >= wakeup_tick;
+}
+
+void set_wakeup_tick(int64_t tick){
+  enum intr_level old_level = intr_disable ();
+  wakeup_tick = tick;
+  intr_set_level (old_level);
+  return;
+}
+
+int64_t get_wakeup_tick(void)
+{
+  enum intr_level old_level = intr_disable ();
+  int64_t t = wakeup_tick;
+  intr_set_level (old_level);
+  return t;
+}
+
 /* Returns the number of timer ticks since the OS booted. */
 int64_t
 timer_ticks (void) 
@@ -98,19 +113,12 @@ timer_sleep (int64_t ticks)
 {
   int64_t start = timer_ticks ();
 
-  int64_t wakeup_tick = start + ticks;
-
   struct sleeping_thread s;
   s.thread = thread_current();
-  s.wake_up_tick = wakeup_tick;
+  s.wake_up_tick = start + ticks;
   sema_init(&s.sleep_sema, 0);
 
-  enum intr_level old_level = intr_disable ();
-
-  list_push_back (&sleep_list, &s.elem);
-  sema_down(&s.sleep_sema);
-
-  intr_set_level (old_level);
+  thread_sleep(&s);
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -188,19 +196,8 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
+  // printf("%d: ticks = %d\n", __LINE__, ticks);
   thread_tick ();
-
-  struct list_elem *e;
-
-  /* Waking up sleeping threads who have passed their wake up time */
-  for (e = list_begin(&sleep_list); e != list_end(&sleep_list); e = list_next(e)){
-    struct sleeping_thread *t = list_entry (e, struct sleeping_thread, elem);
-    /* Here using ticks instead of timer_ticks() because interrupt context */
-    if(t->wake_up_tick <= ticks){
-      list_remove (&(t->elem));
-      sema_up(&(t->sleep_sema));
-    }
-  }
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer

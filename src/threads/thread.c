@@ -11,6 +11,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
@@ -28,11 +29,18 @@ static struct list ready_list;
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
 
+/* List of processes in THREAD_BLOCKED state, that is, processes
+   that are blocked and sleeping untill specified ticks. */
+static struct list sleep_list;
+
 /* Idle thread. */
 static struct thread *idle_thread;
 
 /* Initial thread, the thread running init.c:main(). */
 static struct thread *initial_thread;
+
+/* Wakeup thread: managerial thread that wakes up sleeping threads */
+static struct thread *wakeup_thread;
 
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
@@ -62,6 +70,7 @@ bool thread_mlfqs;
 static void kernel_thread (thread_func *, void *aux);
 
 static void idle (void *aux UNUSED);
+static void wakeup_loop (void *aux);
 static struct thread *running_thread (void);
 static struct thread *next_thread_to_run (void);
 static void init_thread (struct thread *, const char *name, int priority);
@@ -92,6 +101,7 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
+  list_init (&sleep_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -101,20 +111,24 @@ thread_init (void)
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
-   Also creates the idle thread. */
+   Also creates the idle thread as well as wakeup thread. */
 void
 thread_start (void) 
 {
-  /* Create the idle thread. */
+  /* Create the idle and wakeup thread. */
   struct semaphore idle_started;
+  struct semaphore wakeup_started;
   sema_init (&idle_started, 0);
-  thread_create ("idle", PRI_MIN, idle, &idle_started);
+  sema_init (&wakeup_started, 0);
 
+  thread_create ("idle", PRI_MIN, idle, &idle_started);
+  thread_create ("wakeup", PRI_MAX, wakeup_loop, &wakeup_started);
   /* Start preemptive thread scheduling. */
   intr_enable ();
 
-  /* Wait for the idle thread to initialize idle_thread. */
+  /* Wait for the initialization. */
   sema_down (&idle_started);
+  sema_down (&wakeup_started);
 }
 
 /* Called by the timer interrupt handler at each timer tick.
@@ -137,6 +151,9 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+  
+  if (is_wakeup_time() && wakeup_thread->status==THREAD_BLOCKED)
+    thread_unblock(wakeup_thread);
 }
 
 /* Prints thread statistics. */
@@ -314,6 +331,27 @@ thread_yield (void)
   intr_set_level (old_level);
 }
 
+// Comparator function to insert into sleep_list in sorted order
+bool cmp_sleeping_thread_less(const struct list_elem *a, const struct list_elem *b, void *aux) {
+  struct sleeping_thread *st_a = list_entry(a, struct sleeping_thread, elem);
+  struct sleeping_thread *st_b = list_entry(b, struct sleeping_thread, elem);
+  return st_a->wake_up_tick < st_b->wake_up_tick;
+}
+
+/* Makes the thread go to sleep. Must be called through timer_sleep */
+void
+thread_sleep (struct sleeping_thread *s)
+{
+  enum intr_level old_level = intr_disable ();
+
+  if (s->wake_up_tick < get_wakeup_tick()) 
+    set_wakeup_tick(s->wake_up_tick);
+  list_insert_ordered (&sleep_list, &s->elem, cmp_sleeping_thread_less, NULL);
+  sema_down(&s->sleep_sema);
+
+  intr_set_level (old_level);
+}
+
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void
@@ -412,6 +450,41 @@ idle (void *idle_started_ UNUSED)
          7.11.1 "HLT Instruction". */
       asm volatile ("sti; hlt" : : : "memory");
     }
+}
+
+/* Entry point of wakeup thread, executes in a loop */
+static void
+wakeup_loop (void *wakeup_started_)
+{
+  struct semaphore *wakeup_started = wakeup_started_;
+  wakeup_thread = thread_current ();
+  sema_up (wakeup_started);
+  // printf("Created wakeup thread\n");
+
+  while (1)
+  {
+    struct list_elem *e;
+
+    /* Waking up sleeping threads who have passed their wake up time */
+    for (e = list_begin(&sleep_list); e != list_end(&sleep_list); e = list_next(e))
+    {  
+      struct sleeping_thread *t = list_entry (e, struct sleeping_thread, elem);
+      if (t->wake_up_tick <= timer_ticks())
+      {
+        list_remove (&(t->elem));
+        sema_up(&(t->sleep_sema));
+      }
+      else {
+        set_wakeup_tick(t->wake_up_tick);
+        break;
+      }
+    }
+
+    enum intr_level old_level = intr_disable();
+    thread_block();
+    intr_set_level(old_level);
+  }
+
 }
 
 /* Function used as the basis for a kernel thread. */
