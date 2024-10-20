@@ -21,6 +21,7 @@
 static int64_t ticks;
 
 static int64_t wakeup_tick;
+struct semaphore wakeup_sema;
 
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
@@ -39,6 +40,8 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+
+  sema_init(&wakeup_sema, 1);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -74,17 +77,17 @@ int is_wakeup_time(void){
 }
 
 void set_wakeup_tick(int64_t tick){
-  enum intr_level old_level = intr_disable ();
+  sema_down(&wakeup_sema);
   wakeup_tick = tick;
-  intr_set_level (old_level);
+  sema_up(&wakeup_sema);
   return;
 }
 
 int64_t get_wakeup_tick(void)
 {
-  enum intr_level old_level = intr_disable ();
+  sema_down(&wakeup_sema);
   int64_t t = wakeup_tick;
-  intr_set_level (old_level);
+  sema_up(&wakeup_sema);
   return t;
 }
 
